@@ -13,7 +13,7 @@ openstack:
       size: 20 # GB
 tasks:
 - install:
-- ceph:
+- cephadm:
     pre-mgr-commands:
       - sudo ceph config set mgr mgr/devicehealth/enable_monitoring false --force
     conf:

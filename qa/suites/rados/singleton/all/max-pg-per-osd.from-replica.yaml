@@ -26,7 +26,7 @@ overrides:
       - \(PENDING_CREATING_PGS\)
 tasks:
 - install:
-- ceph:
+- cephadm:
 - osd_max_pg_per_osd:
     test_create_from_mon: False
     pg_num: 1

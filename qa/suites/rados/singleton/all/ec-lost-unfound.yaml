@@ -13,7 +13,7 @@ openstack:
       size: 10 # GB
 tasks:
 - install:
-- ceph:
+- cephadm:
     create_rbd_pool: false
     pre-mgr-commands:
       - sudo ceph config set mgr mgr/devicehealth/enable_monitoring false --force
