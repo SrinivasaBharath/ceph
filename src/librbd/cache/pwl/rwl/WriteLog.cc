@@ -76,7 +76,7 @@ void WriteLog<I>::collect_read_extents(
   ceph_assert(hit_bl.length() == entry_hit_length);
 
   /* Add hit extent to read extents */
-  ImageExtentBuf hit_extent_buf(hit_extent, hit_bl);
+  auto hit_extent_buf = std::make_shared<ImageExtentBuf>(hit_extent, hit_bl);
   read_ctx->read_extents.push_back(hit_extent_buf);
 }
 
@@ -258,7 +258,7 @@ void WriteLog<I>::remove_pool_file() {
 }
 
 template <typename I>
-void WriteLog<I>::initialize_pool(Context *on_finish, pwl::DeferredContexts &later) {
+bool WriteLog<I>::initialize_pool(Context *on_finish, pwl::DeferredContexts &later) {
   CephContext *cct = m_image_ctx.cct;
   TOID(struct WriteLogPoolRoot) pool_root;
   ceph_assert(ceph_mutex_is_locked_by_me(m_lock));
@@ -275,7 +275,7 @@ void WriteLog<I>::initialize_pool(Context *on_finish, pwl::DeferredContexts &lat
       m_cache_state->empty = true;
       /* TODO: filter/replace errnos that are meaningless to the caller */
       on_finish->complete(-errno);
-      return;
+      return false;
     }
     m_cache_state->present = true;
     m_cache_state->clean = true;
@@ -292,7 +292,7 @@ void WriteLog<I>::initialize_pool(Context *on_finish, pwl::DeferredContexts &lat
     if (num_small_writes <= 2) {
       lderr(cct) << "num_small_writes needs to > 2" << dendl;
       on_finish->complete(-EINVAL);
-      return;
+      return false;
     }
     this->m_log_pool_actual_size = this->m_log_pool_config_size;
     this->m_bytes_allocated_cap = effective_pool_size;
@@ -319,7 +319,7 @@ void WriteLog<I>::initialize_pool(Context *on_finish, pwl::DeferredContexts &lat
       this->m_free_log_entries = 0;
       lderr(cct) << "failed to initialize pool (" << this->m_log_pool_name << ")" << dendl;
       on_finish->complete(-pmemobj_tx_errno());
-      return;
+      return false;
     } TX_FINALLY {
     } TX_END;
   } else {
@@ -331,7 +331,7 @@ void WriteLog<I>::initialize_pool(Context *on_finish, pwl::DeferredContexts &lat
       lderr(cct) << "failed to open pool (" << this->m_log_pool_name << "): "
                  << pmemobj_errormsg() << dendl;
       on_finish->complete(-errno);
-      return;
+      return false;
     }
     pool_root = POBJ_ROOT(m_log_pool, struct WriteLogPoolRoot);
     if (D_RO(pool_root)->header.layout_version != RWL_POOL_VERSION) {
@@ -340,13 +340,13 @@ void WriteLog<I>::initialize_pool(Context *on_finish, pwl::DeferredContexts &lat
                  << D_RO(pool_root)->header.layout_version
                  << " expected " << RWL_POOL_VERSION << dendl;
       on_finish->complete(-EINVAL);
-      return;
+      return false;
     }
     if (D_RO(pool_root)->block_size != MIN_WRITE_ALLOC_SIZE) {
       lderr(cct) << "Pool block size is " << D_RO(pool_root)->block_size
                  << " expected " << MIN_WRITE_ALLOC_SIZE << dendl;
       on_finish->complete(-EINVAL);
-      return;
+      return false;
     }
     this->m_log_pool_actual_size = D_RO(pool_root)->pool_size;
     this->m_flushed_sync_gen = D_RO(pool_root)->flushed_sync_gen;
@@ -370,6 +370,7 @@ void WriteLog<I>::initialize_pool(Context *on_finish, pwl::DeferredContexts &lat
     m_cache_state->clean = this->m_dirty_log_entries.empty();
     m_cache_state->empty = m_log_entries.empty();
   }
+  return true;
 }
 
 /*
@@ -785,7 +786,8 @@ void WriteLog<I>::process_work() {
             (utime_t(ceph_clock_now() - started).to_msec() < RETIRE_BATCH_TIME_LIMIT_MS))) {
         if (!retire_entries((this->m_shutting_down || this->m_invalidating ||
            (this->m_bytes_allocated > aggressive_high_water_bytes) ||
-           (m_log_entries.size() > aggressive_high_water_entries))
+           (m_log_entries.size() > aggressive_high_water_entries) ||
+           this->m_alloc_failed_since_retire)
             ? MAX_ALLOC_PER_TRANSACTION
             : MAX_FREE_PER_TRANSACTION)) {
           break;
@@ -888,7 +890,7 @@ void WriteLog<I>::reserve_cache(C_BlockIORequestT *req,
     buffer.allocation_lat = ceph_clock_now() - before_reserve;
     if (TOID_IS_NULL(buffer.buffer_oid)) {
       if (!req->has_io_waited_for_buffers()) {
-        req->set_io_waited_for_entries(true);
+        req->set_io_waited_for_buffers(true);
       }
       ldout(m_image_ctx.cct, 5) << "can't allocate all data buffers: "
                                 << pmemobj_errormsg() << ". "

@@ -9,7 +9,7 @@ import orchestrator
 from ceph.deployment import inventory
 from ceph.deployment.service_spec import ServiceSpec
 from ceph.utils import str_to_datetime, datetime_to_str, datetime_now
-from orchestrator import OrchestratorError, HostSpec, OrchestratorEvent
+from orchestrator import OrchestratorError, HostSpec, OrchestratorEvent, service_to_daemon_types
 
 if TYPE_CHECKING:
     from .module import CephadmOrchestrator
@@ -263,7 +263,7 @@ class HostCache():
         self.last_facts_update = {}    # type: Dict[str, datetime.datetime]
         self.osdspec_previews = {}     # type: Dict[str, List[Dict[str, Any]]]
         self.osdspec_last_applied = {}  # type: Dict[str, Dict[str, datetime.datetime]]
-        self.networks = {}             # type: Dict[str, Dict[str, List[str]]]
+        self.networks = {}             # type: Dict[str, Dict[str, Dict[str, List[str]]]]
         self.last_device_update = {}   # type: Dict[str, datetime.datetime]
         self.last_device_change = {}   # type: Dict[str, datetime.datetime]
         self.daemon_refresh_queue = []  # type: List[str]
@@ -309,7 +309,7 @@ class HostCache():
                         orchestrator.DaemonDescription.from_json(d)
                 for d in j.get('devices', []):
                     self.devices[host].append(inventory.Device.from_json(d))
-                self.networks[host] = j.get('networks', {})
+                self.networks[host] = j.get('networks_and_interfaces', {})
                 self.osdspec_previews[host] = j.get('osdspec_previews', {})
                 for name, ts in j.get('osdspec_last_applied', {}).items():
                     self.osdspec_last_applied[host][name] = str_to_datetime(ts)
@@ -358,8 +358,12 @@ class HostCache():
             return True
         return False
 
-    def update_host_devices_networks(self, host, dls, nets):
-        # type: (str, List[inventory.Device], Dict[str,List[str]]) -> None
+    def update_host_devices_networks(
+            self,
+            host: str,
+            dls: List[inventory.Device],
+            nets: Dict[str, Dict[str, List[str]]]
+    ) -> None:
         if (
                 host not in self.devices
                 or host not in self.last_device_change
@@ -438,7 +442,7 @@ class HostCache():
             for d in self.devices[host]:
                 j['devices'].append(d.to_json())
         if host in self.networks:
-            j['networks'] = self.networks[host]
+            j['networks_and_interfaces'] = self.networks[host]
         if host in self.daemon_config_deps:
             for name, depi in self.daemon_config_deps[host].items():
                 j['daemon_config_deps'][name] = {
@@ -518,7 +522,7 @@ class HostCache():
         def alter(host: str, dd_orig: orchestrator.DaemonDescription) -> orchestrator.DaemonDescription:
             dd = copy(dd_orig)
             if host in self.mgr.offline_hosts:
-                dd.status = -1
+                dd.status = orchestrator.DaemonDescriptionStatus.error
                 dd.status_desc = 'host is offline'
             dd.events = self.mgr.events.get_for_daemon(dd.name())
             return dd
@@ -545,7 +549,7 @@ class HostCache():
         result = []   # type: List[orchestrator.DaemonDescription]
         for host, dm in self.daemons.items():
             for name, d in dm.items():
-                if d.daemon_type == service_type:
+                if d.daemon_type in service_to_daemon_types(service_type):
                     result.append(d)
         return result
 
@@ -666,7 +670,7 @@ class HostCache():
         ):
             return True
         created = self.mgr.spec_store.get_created(spec)
-        if created and created > self.last_device_change[host]:
+        if not created or created > self.last_device_change[host]:
             return True
         return self.osdspec_last_applied[host][spec.service_name()] < self.last_device_change[host]
 

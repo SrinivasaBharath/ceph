@@ -53,6 +53,7 @@ public:
   static constexpr OperationTypeCode type = OperationTypeCode::client_request;
 
   ClientRequest(OSD &osd, crimson::net::ConnectionRef, Ref<MOSDOp> &&m);
+  ~ClientRequest();
 
   void print(std::ostream &) const final;
   void dump_detail(Formatter *f) const final;
@@ -61,20 +62,32 @@ public:
   seastar::future<> start();
 
 private:
-  seastar::future<> process_pg_op(Ref<PG>& pg);
-  seastar::future<> process_op(Ref<PG>& pg);
-  seastar::future<> do_recover_missing(Ref<PG>& pgref);
-  seastar::future<> do_process(
+  interruptible_future<> do_recover_missing(Ref<PG>& pgref);
+  interruptible_future<> do_process(
       Ref<PG>& pg,
       crimson::osd::ObjectContextRef obc);
-
+  ::crimson::interruptible::interruptible_future<
+    ::crimson::osd::IOInterruptCondition> process_pg_op(
+    Ref<PG> &pg);
+  ::crimson::interruptible::interruptible_future<
+    ::crimson::osd::IOInterruptCondition> process_op(
+    Ref<PG> &pg);
   bool is_pg_op() const;
 
   ConnectionPipeline &cp();
   PGPipeline &pp(PG &pg);
 
+  OpSequencer& sequencer;
+  uint64_t prev_op_id = 0;
+
+  template <typename Errorator>
+  using interruptible_errorator =
+    ::crimson::interruptible::interruptible_errorator<
+      ::crimson::osd::IOInterruptCondition,
+      Errorator>;
 private:
   bool is_misdirected(const PG& pg) const;
+  void may_set_prev_op();
 };
 
 }

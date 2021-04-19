@@ -1,13 +1,14 @@
-if(Boost_VERSION VERSION_GREATER_EQUAL 1.74)
-  add_definitions(-DBOOST_ASIO_USE_TS_EXECUTOR_AS_DEFAULT)
-endif()
+set(civetweb_h
+  "${CMAKE_BINARY_DIR}/src/include/civetweb/civetweb.h")
 
-add_custom_target(civetweb_h
+add_custom_command(
+  OUTPUT ${civetweb_h}
   COMMAND ${CMAKE_COMMAND} -E make_directory
-  "${CMAKE_BINARY_DIR}/src/include/civetweb"
+    "${CMAKE_BINARY_DIR}/src/include/civetweb"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
-  "${CMAKE_SOURCE_DIR}/src/civetweb/include/civetweb.h"
-  "${CMAKE_BINARY_DIR}/src/include/civetweb"
+    "${CMAKE_SOURCE_DIR}/src/civetweb/include/civetweb.h"
+    ${civetweb_h}
+  DEPENDS "${CMAKE_SOURCE_DIR}/src/civetweb/include/civetweb.h"
   COMMENT "keep civetweb.h up-to-date")
 
 find_program(GPERF gperf)
@@ -22,6 +23,8 @@ function(gperf_generate input output)
     COMMENT "Generate ${output}"
     )
 endfunction()
+
+find_package(ICU 52.0 COMPONENTS uc REQUIRED)
 
 set(librgw_common_srcs
   services/svc_finisher.cc
@@ -139,6 +142,7 @@ set(librgw_common_srcs
   rgw_tag.cc
   rgw_tag_s3.cc
   rgw_tools.cc
+  rgw_log_backing.cc
   rgw_user.cc
   rgw_website.cc
   rgw_xml.cc
@@ -156,8 +160,9 @@ set(librgw_common_srcs
   rgw_rest_iam.cc
   rgw_object_lock.cc
   rgw_kms.cc
+  rgw_kmip_client.cc
   rgw_url.cc
-  rgw_oidc_provider
+  rgw_oidc_provider.cc
   rgw_datalog.cc
   cls_fifo_legacy.cc
   rgw_lua_utils.cc
@@ -178,11 +183,23 @@ target_include_directories(rgw_common PUBLIC "${CMAKE_SOURCE_DIR}/src/dmclock/su
 target_include_directories(rgw_common PUBLIC "${CMAKE_SOURCE_DIR}/src/fmt/include")
 target_include_directories(rgw_common PUBLIC "${CMAKE_SOURCE_DIR}/src/rgw")
 target_include_directories(rgw_common PRIVATE "${LUA_INCLUDE_DIR}")
+target_include_directories(rgw_common SYSTEM PRIVATE "${ICU_INCLUDE_DIRS}")
 
+
+set(librgw_kmip_srcs
+  rgw_kmip_client_impl.cc)
+
+add_library(rgw_kmip OBJECT ${librgw_kmip_srcs})
+
+target_include_directories(rgw_kmip PRIVATE "${CMAKE_SOURCE_DIR}/src/libkmip")
 
 target_include_directories(rgw_common PRIVATE
   $<TARGET_PROPERTY:spawn,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_definitions(rgw_common PRIVATE
+  $<TARGET_PROPERTY:spawn,INTERFACE_COMPILE_DEFINITIONS>)
+target_include_directories(rgw_kmip PRIVATE
+  $<TARGET_PROPERTY:spawn,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_definitions(rgw_kmip PRIVATE
   $<TARGET_PROPERTY:spawn,INTERFACE_COMPILE_DEFINITIONS>)
 
 if(WITH_LTTNG)
@@ -219,7 +236,8 @@ set(rgw_a_srcs
   rgw_usage.cc
   rgw_opa.cc
   rgw_sts.cc
-  rgw_rest_sts.cc)
+  rgw_rest_sts.cc
+  ${civetweb_h})
 
 gperf_generate(${CMAKE_SOURCE_DIR}/src/rgw/rgw_iam_policy_keywords.gperf
   rgw_iam_policy_keywords.frag.cc)
@@ -235,8 +253,6 @@ endif()
 add_library(rgw_a STATIC
     ${rgw_a_srcs}
     $<TARGET_OBJECTS:rgw_common>)
-
-add_dependencies(rgw_a civetweb_h)
 
 target_compile_definitions(rgw_a PUBLIC "-DCLS_CLIENT_HIDE_IOCTX")
 target_include_directories(rgw_a PUBLIC "${CMAKE_SOURCE_DIR}/src/dmclock/support/src")
@@ -258,6 +274,7 @@ target_link_libraries(rgw_a
   ${CURL_LIBRARIES}
   ${EXPAT_LIBRARIES}
   ${OPENLDAP_LIBRARIES} ${CRYPTO_LIBS}
+  ICU::uc
   OATH::OATH)
 
 if(WITH_CURL_OPENSSL)
@@ -292,7 +309,8 @@ set(radosgw_srcs
   rgw_loadgen_process.cc
   rgw_civetweb.cc
   rgw_civetweb_frontend.cc
-  rgw_civetweb_log.cc)
+  rgw_civetweb_log.cc
+  ${civetweb_h})
 if (WITH_RADOSGW_FCGI_FRONTEND)
   list(APPEND radosgw_srcs rgw_fcgi_process.cc)
 endif()
@@ -310,16 +328,15 @@ target_link_libraries(rgw_schedulers
   PUBLIC dmclock::dmclock)
 
 add_library(radosgw SHARED ${radosgw_srcs} ${rgw_a_srcs} rgw_main.cc
+  $<TARGET_OBJECTS:rgw_kmip>
   $<TARGET_OBJECTS:civetweb_common_objs>)
-
-add_dependencies(radosgw civetweb_h)
 
 target_compile_definitions(radosgw PUBLIC "-DCLS_CLIENT_HIDE_IOCTX")
 target_include_directories(radosgw PUBLIC "${CMAKE_SOURCE_DIR}/src/dmclock/support/src")
 target_include_directories(radosgw SYSTEM PUBLIC "../rapidjson/include")
 
 target_link_libraries(radosgw
-  PRIVATE ${rgw_libs} rgw_schedulers
+  PRIVATE ${rgw_libs} rgw_schedulers kmip
   PUBLIC dmclock::dmclock
 )
 if(WITH_RADOSGW_BEAST_FRONTEND)

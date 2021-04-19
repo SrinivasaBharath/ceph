@@ -58,8 +58,6 @@
 #include "messages/MCommand.h"
 #include "messages/MCommandReply.h"
 
-#include "messages/MAuthReply.h"
-
 #include "messages/MTimeCheck2.h"
 #include "messages/MPing.h"
 
@@ -85,7 +83,7 @@
 #include "MgrMonitor.h"
 #include "MgrStatMonitor.h"
 #include "ConfigMonitor.h"
-#include "mon/ConfigKeyService.h"
+#include "KVMonitor.h"
 #include "mon/HealthMonitor.h"
 #include "common/config.h"
 #include "common/cmdparse.h"
@@ -248,8 +246,7 @@ Monitor::Monitor(CephContext* cct_, string nm, MonitorDBStore *s,
   paxos_service[PAXOS_MGRSTAT].reset(new MgrStatMonitor(*this, *paxos, "mgrstat"));
   paxos_service[PAXOS_HEALTH].reset(new HealthMonitor(*this, *paxos, "health"));
   paxos_service[PAXOS_CONFIG].reset(new ConfigMonitor(*this, *paxos, "config"));
-
-  config_key_service = std::make_unique<ConfigKeyService>(*this, *paxos);
+  paxos_service[PAXOS_KV].reset(new KVMonitor(*this, *paxos, "kv"));
 
   bool r = mon_caps.parse("allow *", NULL);
   ceph_assert(r);
@@ -1283,8 +1280,7 @@ bool Monitor::_add_bootstrap_peer_hint(std::string_view cmd,
 	     << addrstr << "'" << dendl;
 
     entity_addr_t addr;
-    const char *end = 0;
-    if (!addr.parse(addrstr.c_str(), &end, entity_addr_t::TYPE_ANY)) {
+    if (!addr.parse(addrstr, entity_addr_t::TYPE_ANY)) {
       ss << "failed to parse addrs '" << addrstr
 	 << "'; syntax is 'add_bootstrap_peer_hint ip[:port]'";
       return false;
@@ -1369,7 +1365,6 @@ set<string> Monitor::get_sync_targets_names()
   for (auto& svc : paxos_service) {
     svc->get_store_prefixes(targets);
   }
-  config_key_service->get_store_prefixes(targets);
   return targets;
 }
 
@@ -1921,7 +1916,7 @@ void Monitor::handle_probe_probe(MonOpRequestRef op)
 {
   auto m = op->get_req<MMonProbe>();
 
-  dout(10) << "handle_probe_probe " << m->get_source_inst() << *m
+  dout(10) << "handle_probe_probe " << m->get_source_inst() << " " << *m
 	   << " features " << m->get_connection()->get_features() << dendl;
   uint64_t missing = required_features & ~m->get_connection()->get_features();
   if ((m->mon_release != ceph_release_t::unknown &&
@@ -1959,6 +1954,7 @@ void Monitor::handle_probe_probe(MonOpRequestRef op)
 		    ceph_release());
   r->name = name;
   r->quorum = quorum;
+  r->leader = leader;
   monmap->encode(r->monmap_bl, m->get_connection()->get_features());
   r->paxos_first_version = paxos->get_first_committed();
   r->paxos_last_version = paxos->get_version();
@@ -2003,6 +1999,7 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
 	       << ", mine was " << monmap->get_epoch() << dendl;
       delete newmap;
       monmap->decode(m->monmap_bl);
+      notify_new_monmap(false);
 
       bootstrap();
       return;
@@ -2107,16 +2104,25 @@ void Monitor::handle_probe_reply(MonOpRequestRef op)
              << " vs my version " << paxos->get_version()
              << " (ok)"
              << dendl;
-
-    if (monmap->contains(name) &&
-        !monmap->get_addrs(name).front().is_blank_ip()) {
+    bool in_map = false;
+    const auto my_info = monmap->mon_info.find(name);
+    const map<string,string> *map_crush_loc{nullptr};
+    if (my_info != monmap->mon_info.end()) {
+      in_map = true;
+      map_crush_loc = &my_info->second.crush_loc;
+    }
+    if (in_map &&
+	!monmap->get_addrs(name).front().is_blank_ip() &&
+	(!need_set_crush_loc || (*map_crush_loc == crush_loc))) {
       // i'm part of the cluster; just initiate a new election
       start_election();
     } else {
-      dout(10) << " ready to join, but i'm not in the monmap or my addr is blank, trying to join" << dendl;
-      send_mon_message(
-	new MMonJoin(monmap->fsid, name, messenger->get_myaddrs()),
-	*m->quorum.begin());
+      dout(10) << " ready to join, but i'm not in the monmap/"
+	"my addr is blank/location is wrong, trying to join" << dendl;
+      send_mon_message(new MMonJoin(monmap->fsid, name,
+				    messenger->get_myaddrs(), crush_loc,
+				    need_set_crush_loc),
+		       m->leader);
     }
   } else {
     if (monmap->contains(m->name)) {
@@ -2380,13 +2386,18 @@ void Monitor::finish_election()
     authmon()->_set_mon_num_rank(monmap->size(), rank);
   }
 
-  // am i named properly?
+  // am i named and located properly?
   string cur_name = monmap->get_name(messenger->get_myaddrs());
-  if (cur_name != name) {
-    dout(10) << " renaming myself from " << cur_name << " -> " << name << dendl;
-    send_mon_message(
-      new MMonJoin(monmap->fsid, name, messenger->get_myaddrs()),
-      *quorum.begin());
+  const auto my_infop = monmap->mon_info.find(cur_name);
+  const map<string,string>& map_crush_loc = my_infop->second.crush_loc;
+  
+  if (cur_name != name ||
+      (need_set_crush_loc && map_crush_loc != crush_loc)) {
+    dout(10) << " renaming/moving myself from " << cur_name << "/"
+	     << map_crush_loc <<" -> " << name << "/" << crush_loc << dendl;
+    send_mon_message(new MMonJoin(monmap->fsid, name, messenger->get_myaddrs(),
+				  crush_loc, need_set_crush_loc),
+		     leader);
     return;
   }
   do_stretch_mode_election_work();
@@ -3064,7 +3075,9 @@ void Monitor::get_cluster_status(stringstream &ss, Formatter *f,
       const FSMap *fsmapp = &fsmap_copy;
 
       if (fsmapp->filesystem_count() > 0 and mdsmon()->should_print_status()){
-        ss << "    mds: " << spacing << *fsmapp << "\n";
+        ss << "    mds: " << spacing;
+	fsmapp->print_daemon_summary(ss);
+	ss << "\n";
       }
 
       ss << "    osd: " << spacing;
@@ -3094,6 +3107,7 @@ void Monitor::get_cluster_status(stringstream &ss, Formatter *f,
     }
 
     ss << "\n \n  data:\n";
+    mdsmon()->print_fs_summary(ss);
     mgrstatmon()->print_summary(NULL, &ss);
 
     auto& pem = mgrstatmon()->get_progress_events();
@@ -3533,7 +3547,7 @@ void Monitor::handle_command(MonOpRequestRef op)
   }
 
   if (module == "config-key") {
-    config_key_service->dispatch(op);
+    kvmon()->dispatch(op);
     return;
   }
 
@@ -3685,7 +3699,7 @@ void Monitor::handle_command(MonOpRequestRef op)
     rs = ss2.str();
     r = 0;
   } else if (prefix == "osd last-stat-seq") {
-    int64_t osd;
+    int64_t osd = 0;
     cmd_getval(cmdmap, "id", osd);
     uint64_t seq = mgrstatmon()->get_last_osd_stat_seq(osd);
     if (f) {
@@ -4191,31 +4205,30 @@ void Monitor::handle_route(MonOpRequestRef op)
     dout(10) << "handle_route tid " << m->session_mon_tid << " null" << dendl;
   
   // look it up
-  if (m->session_mon_tid) {
-    if (routed_requests.count(m->session_mon_tid)) {
-      RoutedRequest *rr = routed_requests[m->session_mon_tid];
-
-      // reset payload, in case encoding is dependent on target features
-      if (m->msg) {
-	m->msg->clear_payload();
-	rr->con->send_message(m->msg);
-	m->msg = NULL;
-      }
-      if (m->send_osdmap_first) {
-	dout(10) << " sending osdmaps from " << m->send_osdmap_first << dendl;
-	osdmon()->send_incremental(m->send_osdmap_first, rr->session,
-				   true, MonOpRequestRef());
-      }
-      ceph_assert(rr->tid == m->session_mon_tid && rr->session->routed_request_tids.count(m->session_mon_tid));
-      routed_requests.erase(m->session_mon_tid);
-      rr->session->routed_request_tids.erase(m->session_mon_tid);
-      delete rr;
-    } else {
-      dout(10) << " don't have routed request tid " << m->session_mon_tid << dendl;
-    }
-  } else {
+  if (!m->session_mon_tid) {
     dout(10) << " not a routed request, ignoring" << dendl;
+    return;
   }
+  auto found = routed_requests.find(m->session_mon_tid);
+  if (found == routed_requests.end()) {
+    dout(10) << " don't have routed request tid " << m->session_mon_tid << dendl;
+    return;
+  }
+  std::unique_ptr<RoutedRequest> rr{found->second};
+  // reset payload, in case encoding is dependent on target features
+  if (m->msg) {
+    m->msg->clear_payload();
+    rr->con->send_message(m->msg);
+    m->msg = NULL;
+  }
+  if (m->send_osdmap_first) {
+    dout(10) << " sending osdmaps from " << m->send_osdmap_first << dendl;
+    osdmon()->send_incremental(m->send_osdmap_first, rr->session,
+			       true, MonOpRequestRef());
+  }
+  ceph_assert(rr->tid == m->session_mon_tid && rr->session->routed_request_tids.count(m->session_mon_tid));
+  routed_requests.erase(found);
+  rr->session->routed_request_tids.erase(m->session_mon_tid);
 }
 
 void Monitor::resend_routed_requests()
@@ -4427,9 +4440,13 @@ void Monitor::_ms_dispatch(Message *m)
 
   if (s->auth_handler) {
     s->entity_name = s->auth_handler->get_entity_name();
+    s->global_id = s->auth_handler->get_global_id();
+    s->global_id_status = s->auth_handler->get_global_id_status();
   }
-  dout(20) << " entity " << s->entity_name
-	   << " caps " << s->caps.get_str() << dendl;
+  dout(20) << " entity_name " << s->entity_name
+	   << " global_id " << s->global_id
+	   << " (" << s->global_id_status
+	   << ") caps " << s->caps.get_str() << dendl;
 
   if (!session_stretch_allowed(s, op)) {
     return;
@@ -4480,6 +4497,34 @@ void Monitor::dispatch_op(MonOpRequestRef op)
     dout(5) << __func__ << " " << op->get_req()->get_source_inst()
             << " is not authenticated, dropping " << *(op->get_req())
             << dendl;
+    return;
+  }
+
+  // global_id_status == NONE: all sessions for auth_none and krb,
+  // mon <-> mon sessions (including proxied sessions) for cephx
+  ceph_assert(s->global_id_status == global_id_status_t::NONE ||
+              s->global_id_status == global_id_status_t::NEW_OK ||
+              s->global_id_status == global_id_status_t::NEW_NOT_EXPOSED ||
+              s->global_id_status == global_id_status_t::RECLAIM_OK ||
+              s->global_id_status == global_id_status_t::RECLAIM_INSECURE);
+
+  // let mon_getmap through for "ping" (which doesn't reconnect)
+  // and "tell" (which reconnects but doesn't attempt to preserve
+  // its global_id and stays in NEW_NOT_EXPOSED, retrying until
+  // ->send_attempts reaches 0)
+  if (cct->_conf->auth_expose_insecure_global_id_reclaim &&
+      s->global_id_status == global_id_status_t::NEW_NOT_EXPOSED &&
+      op->get_req()->get_type() != CEPH_MSG_MON_GET_MAP) {
+    dout(5) << __func__ << " " << op->get_req()->get_source_inst()
+            << " may omit old_ticket on reconnects, discarding "
+            << *op->get_req() << " and forcing reconnect" << dendl;
+    ceph_assert(s->con && !s->proxy_con);
+    s->con->mark_down();
+    {
+      std::lock_guard l(session_map_lock);
+      remove_session(s);
+    }
+    op->mark_zap();
     return;
   }
 
@@ -5216,6 +5261,8 @@ void Monitor::handle_subscribe(MonOpRequestRef op)
       mgrstatmon()->check_sub(s->sub_map[p->first]);
     } else if (p->first == "config") {
       configmon()->check_sub(s);
+    } else if (p->first.find("kv:") == 0) {
+      kvmon()->check_sub(s->sub_map[p->first]);
     }
   }
 
@@ -6176,7 +6223,7 @@ bool Monitor::get_authorizer(int service_id, AuthAuthorizer **authorizer)
     }
 
     ret = key_server.build_session_auth_info(
-      service_id, auth_ticket_info.ticket, info, secret, (uint64_t)-1);
+      service_id, auth_ticket_info.ticket, secret, (uint64_t)-1, info);
     if (ret < 0) {
       dout(0) << __func__ << " failed to build mon session_auth_info "
 	      << cpp_strerror(ret) << dendl;
@@ -6350,14 +6397,14 @@ int Monitor::handle_auth_request(
     // are supported by the client if we require it.  for msgr2 that
     // is not necessary.
 
+    bool is_new_global_id = false;
     if (!con->peer_global_id) {
       con->peer_global_id = authmon()->_assign_global_id();
       if (!con->peer_global_id) {
 	dout(1) << __func__ << " failed to assign global_id" << dendl;
 	return -EBUSY;
       }
-      dout(10) << __func__ << "  assigned global_id " << con->peer_global_id
-	       << dendl;
+      is_new_global_id = true;
     }
 
     // set up partial session
@@ -6367,11 +6414,10 @@ int Monitor::handle_auth_request(
 
     r = s->auth_handler->start_session(
       entity_name,
-      auth_meta->get_connection_secret_length(),
+      con->peer_global_id,
+      is_new_global_id,
       reply,
-      &con->peer_caps_info,
-      &auth_meta->session_key,
-      &auth_meta->connection_secret);
+      &con->peer_caps_info);
   } else {
     priv = con->get_priv();
     if (!priv) {
@@ -6384,7 +6430,6 @@ int Monitor::handle_auth_request(
       p,
       auth_meta->get_connection_secret_length(),
       reply,
-      &con->peer_global_id,
       &con->peer_caps_info,
       &auth_meta->session_key,
       &auth_meta->connection_secret);
@@ -6483,8 +6528,26 @@ int Monitor::ms_handle_authentication(Connection *con)
   return ret;
 }
 
-void Monitor::notify_new_monmap()
+void Monitor::set_mon_crush_location(const string& loc)
 {
+  if (loc.empty()) {
+    return;
+  }
+  vector<string> loc_vec;
+  loc_vec.push_back(loc);
+  CrushWrapper::parse_loc_map(loc_vec, &crush_loc);
+  need_set_crush_loc = true;
+}
+
+void Monitor::notify_new_monmap(bool can_change_external_state)
+{
+  if (need_set_crush_loc) {
+    auto my_info_i = monmap->mon_info.find(name);
+    if (my_info_i != monmap->mon_info.end() &&
+	my_info_i->second.crush_loc == crush_loc) {
+      need_set_crush_loc = false;
+    }
+  }
   elector.notify_strategy_maybe_changed(monmap->strategy);
   dout(30) << __func__ << "we have " << monmap->removed_ranks.size() << " removed ranks" << dendl;
   for (auto i = monmap->removed_ranks.rbegin();
@@ -6495,7 +6558,7 @@ void Monitor::notify_new_monmap()
   }
 
   if (monmap->stretch_mode_enabled) {
-    maybe_engage_stretch_mode();
+    try_engage_stretch_mode();
   }
 
   if (is_stretch_mode()) {
@@ -6503,7 +6566,7 @@ void Monitor::notify_new_monmap()
       set_degraded_stretch_mode();
     }
   }
-  set_elector_disallowed_leaders(true);
+  set_elector_disallowed_leaders(can_change_external_state);
 }
 
 void Monitor::set_elector_disallowed_leaders(bool allow_election)
@@ -6529,10 +6592,10 @@ struct CMonEnableStretchMode : public Context {
   Monitor *m;
   CMonEnableStretchMode(Monitor *mon) : m(mon) {}
   void finish(int r) {
-    m->maybe_engage_stretch_mode();
+    m->try_engage_stretch_mode();
   }
 };
-void Monitor::maybe_engage_stretch_mode()
+void Monitor::try_engage_stretch_mode()
 {
   dout(20) << __func__ << dendl;
   if (stretch_mode_engaged) return;
@@ -6623,8 +6686,14 @@ void Monitor::go_recovery_stretch_mode()
   if (!osdmon()->is_writeable()) {
     osdmon()->wait_for_writeable_ctx(new CMonGoRecovery(this));
   }
+  osdmon()->trigger_recovery_stretch_mode();
+}
+
+void Monitor::set_recovery_stretch_mode()
+{
+  degraded_stretch_mode = true;
   recovering_stretch_mode = true;
-  osdmon()->trigger_recovery_stretch_mode();  
+  osdmon()->set_recovery_stretch_mode();
 }
 
 void Monitor::maybe_go_degraded_stretch_mode()
@@ -6685,6 +6754,7 @@ void Monitor::set_degraded_stretch_mode()
 {
   degraded_stretch_mode = true;
   recovering_stretch_mode = false;
+  osdmon()->set_degraded_stretch_mode();
 }
 
 struct CMonGoHealthy : public Context {
@@ -6709,7 +6779,6 @@ void Monitor::trigger_healthy_stretch_mode()
   }
 
   ceph_assert(osdmon()->osdmap.recovering_stretch_mode);
-  set_healthy_stretch_mode();
   osdmon()->trigger_healthy_stretch_mode();
   monmon()->trigger_healthy_stretch_mode();
 }
@@ -6718,6 +6787,7 @@ void Monitor::set_healthy_stretch_mode()
 {
   degraded_stretch_mode = false;
   recovering_stretch_mode = false;
+  osdmon()->set_healthy_stretch_mode();
 }
 
 bool Monitor::session_stretch_allowed(MonSession *s, MonOpRequestRef& op)

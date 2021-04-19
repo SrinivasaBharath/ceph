@@ -1692,7 +1692,7 @@ int BlueFS::device_migrate_to_new(
 
   dout(10) << __func__ << " devs_source " << devs_source
 	   << " dev_target " << dev_target << dendl;
-  assert(dev_target == (int)BDEV_NEWDB || (int)BDEV_NEWWAL);
+  assert(dev_target == (int)BDEV_NEWDB || dev_target == (int)BDEV_NEWWAL);
 
   int flags = 0;
 
@@ -1927,8 +1927,9 @@ int64_t BlueFS::_read_random(
 	      << " 0x" << off << "~" << len << std::dec
 	      << dendl;
 
-      // NOTE: h->bl is normally a contiguous buffer so c_str() is free.
-      memcpy(out, buf->bl.c_str() + off - buf->bl_off, r);
+      auto p = buf->bl.begin();
+      p.seek(off - buf->bl_off);
+      p.copy(r, out);
       out += r;
 
       dout(30) << __func__ << " result chunk (0x"
@@ -2046,8 +2047,9 @@ int64_t BlueFS::_read(
       outbl->claim_append(t);
     }
     if (out) {
-      // NOTE: h->bl is normally a contiguous buffer so c_str() is free.
-      memcpy(out, buf->bl.c_str() + off - buf->bl_off, r);
+      auto p = buf->bl.begin();
+      p.seek(off - buf->bl_off);
+      p.copy(r, out);
       out += r;
     }
 
@@ -2683,7 +2685,11 @@ int BlueFS::_flush_range(FileWriter *h, uint64_t offset, uint64_t length)
   dout(10) << __func__ << " " << h << " pos 0x" << std::hex << h->pos
 	   << " 0x" << offset << "~" << length << std::dec
 	   << " to " << h->file->fnode << dendl;
-  ceph_assert(!h->file->deleted);
+  if (h->file->deleted) {
+    dout(10) << __func__ << "  deleted, no-op" << dendl;
+    return 0;
+  }
+
   ceph_assert(h->file->num_readers.load() == 0);
 
   bool buffered;
@@ -3174,8 +3180,8 @@ void BlueFS::_maybe_compact_log(std::unique_lock<ceph::mutex>& l)
 }
 
 int BlueFS::open_for_write(
-  const string& dirname,
-  const string& filename,
+  std::string_view dirname,
+  std::string_view filename,
   FileWriter **h,
   bool overwrite)
 {
@@ -3206,7 +3212,7 @@ int BlueFS::open_for_write(
     file = ceph::make_ref<File>();
     file->fnode.ino = ++ino_last;
     file_map[ino_last] = file;
-    dir->file_map[filename] = file;
+    dir->file_map[string{filename}] = file;
     ++file->refs;
     create = true;
   } else {
@@ -3283,7 +3289,7 @@ void BlueFS::_close_writer(FileWriter *h)
     if (bdev[i]) {
       if (h->iocv[i]) {
 	h->iocv[i]->aio_wait();
-	bdev[i]->queue_reap_ioc(h->iocv[i]);
+	delete h->iocv[i];
       }
     }
   }
@@ -3291,8 +3297,8 @@ void BlueFS::_close_writer(FileWriter *h)
 }
 
 int BlueFS::open_for_read(
-  const string& dirname,
-  const string& filename,
+  std::string_view dirname,
+  std::string_view filename,
   FileReader **h,
   bool random)
 {
@@ -3322,8 +3328,8 @@ int BlueFS::open_for_read(
 }
 
 int BlueFS::rename(
-  const string& old_dirname, const string& old_filename,
-  const string& new_dirname, const string& new_filename)
+  std::string_view old_dirname, std::string_view old_filename,
+  std::string_view new_dirname, std::string_view new_filename)
 {
   std::lock_guard l(lock);
   dout(10) << __func__ << " " << old_dirname << "/" << old_filename
@@ -3362,15 +3368,15 @@ int BlueFS::rename(
   dout(10) << __func__ << " " << new_dirname << "/" << new_filename << " "
 	   << " " << file->fnode << dendl;
 
-  new_dir->file_map[new_filename] = file;
-  old_dir->file_map.erase(old_filename);
+  new_dir->file_map[string{new_filename}] = file;
+  old_dir->file_map.erase(string{old_filename});
 
   log_t.op_dir_link(new_dirname, new_filename, file->fnode.ino);
   log_t.op_dir_unlink(old_dirname, old_filename);
   return 0;
 }
 
-int BlueFS::mkdir(const string& dirname)
+int BlueFS::mkdir(std::string_view dirname)
 {
   std::lock_guard l(lock);
   dout(10) << __func__ << " " << dirname << dendl;
@@ -3379,16 +3385,16 @@ int BlueFS::mkdir(const string& dirname)
     dout(20) << __func__ << " dir " << dirname << " exists" << dendl;
     return -EEXIST;
   }
-  dir_map[dirname] = ceph::make_ref<Dir>();
+  dir_map[string{dirname}] = ceph::make_ref<Dir>();
   log_t.op_dir_create(dirname);
   return 0;
 }
 
-int BlueFS::rmdir(const string& dirname)
+int BlueFS::rmdir(std::string_view dirname)
 {
   std::lock_guard l(lock);
   dout(10) << __func__ << " " << dirname << dendl;
-  map<string,DirRef>::iterator p = dir_map.find(dirname);
+  auto p = dir_map.find(dirname);
   if (p == dir_map.end()) {
     dout(20) << __func__ << " dir " << dirname << " does not exist" << dendl;
     return -ENOENT;
@@ -3398,12 +3404,12 @@ int BlueFS::rmdir(const string& dirname)
     dout(20) << __func__ << " dir " << dirname << " not empty" << dendl;
     return -ENOTEMPTY;
   }
-  dir_map.erase(dirname);
+  dir_map.erase(string{dirname});
   log_t.op_dir_remove(dirname);
   return 0;
 }
 
-bool BlueFS::dir_exists(const string& dirname)
+bool BlueFS::dir_exists(std::string_view dirname)
 {
   std::lock_guard l(lock);
   map<string,DirRef>::iterator p = dir_map.find(dirname);
@@ -3412,7 +3418,7 @@ bool BlueFS::dir_exists(const string& dirname)
   return exists;
 }
 
-int BlueFS::stat(const string& dirname, const string& filename,
+int BlueFS::stat(std::string_view dirname, std::string_view filename,
 		 uint64_t *size, utime_t *mtime)
 {
   std::lock_guard l(lock);
@@ -3440,7 +3446,7 @@ int BlueFS::stat(const string& dirname, const string& filename,
   return 0;
 }
 
-int BlueFS::lock_file(const string& dirname, const string& filename,
+int BlueFS::lock_file(std::string_view dirname, std::string_view filename,
 		      FileLock **plock)
 {
   std::lock_guard l(lock);
@@ -3451,7 +3457,7 @@ int BlueFS::lock_file(const string& dirname, const string& filename,
     return -ENOENT;
   }
   DirRef dir = p->second;
-  map<string,FileRef>::iterator q = dir->file_map.find(filename);
+  auto q = dir->file_map.find(filename);
   FileRef file;
   if (q == dir->file_map.end()) {
     dout(20) << __func__ << " dir " << dirname << " (" << dir
@@ -3461,7 +3467,7 @@ int BlueFS::lock_file(const string& dirname, const string& filename,
     file->fnode.ino = ++ino_last;
     file->fnode.mtime = ceph_clock_now();
     file_map[ino_last] = file;
-    dir->file_map[filename] = file;
+    dir->file_map[string{filename}] = file;
     ++file->refs;
     log_t.op_file_update(file->fnode);
     log_t.op_dir_link(dirname, filename, file->fnode.ino);
@@ -3489,8 +3495,12 @@ int BlueFS::unlock_file(FileLock *fl)
   return 0;
 }
 
-int BlueFS::readdir(const string& dirname, vector<string> *ls)
+int BlueFS::readdir(std::string_view dirname, vector<string> *ls)
 {
+  // dirname may contain a trailing /
+  if (!dirname.empty() && dirname.back() == '/') {
+    dirname.remove_suffix(1);
+  }
   std::lock_guard l(lock);
   dout(10) << __func__ << " " << dirname << dendl;
   if (dirname.empty()) {
@@ -3517,7 +3527,7 @@ int BlueFS::readdir(const string& dirname, vector<string> *ls)
   return 0;
 }
 
-int BlueFS::unlink(const string& dirname, const string& filename)
+int BlueFS::unlink(std::string_view dirname, std::string_view filename)
 {
   std::lock_guard l(lock);
   dout(10) << __func__ << " " << dirname << "/" << filename << dendl;
@@ -3539,7 +3549,7 @@ int BlueFS::unlink(const string& dirname, const string& filename)
              << " is locked" << dendl;
     return -EBUSY;
   }
-  dir->file_map.erase(filename);
+  dir->file_map.erase(string{filename});
   log_t.op_dir_unlink(dirname, filename);
   _drop_link(file);
   return 0;
@@ -3767,7 +3777,7 @@ size_t BlueFS::probe_alloc_avail(int dev, uint64_t alloc_size)
 void* OriginalVolumeSelector::get_hint_for_log() const {
   return reinterpret_cast<void*>(BlueFS::BDEV_WAL);
 }
-void* OriginalVolumeSelector::get_hint_by_dir(const string& dirname) const {
+void* OriginalVolumeSelector::get_hint_by_dir(std::string_view dirname) const {
   uint8_t res = BlueFS::BDEV_DB;
   if (dirname.length() > 5) {
     // the "db.slow" and "db.wal" directory names are hard-coded at

@@ -61,6 +61,7 @@ if(NOT WIN32)
   add_subdirectory(filestore)
   add_subdirectory(fs)
   add_subdirectory(libcephfs)
+  add_subdirectory(libcephsqlite)
   add_subdirectory(client)
   add_subdirectory(mon)
   add_subdirectory(mgr)
@@ -150,6 +151,12 @@ add_executable(ceph_bench_log
 target_link_libraries(ceph_bench_log global pthread ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
 if(NOT WIN32)
   target_link_libraries(ceph_bench_log rt)
+endif()
+
+if(WITH_SYSTEMD)
+  add_executable(ceph_bench_journald_logger
+    bench_journald_logger.cc)
+  target_link_libraries(ceph_bench_journald_logger ceph-common)
 endif()
 
 # ceph_test_mutate
@@ -530,6 +537,7 @@ if(NOT WIN32)
   ceph-mon
   get_command_descriptions
   ceph-dencoder
+  ceph-dencoder-modules
   ceph-objectstore-tool
   ceph-kvstore-tool
   ceph-monstore-tool
@@ -589,6 +597,26 @@ add_ceph_test(run-cli-tests ${CMAKE_CURRENT_SOURCE_DIR}/run-cli-tests)
 #add_ceph_test(test_pidfile.sh ${CMAKE_CURRENT_SOURCE_DIR}/test_pidfile.sh)
 
 add_ceph_test(smoke.sh ${CMAKE_CURRENT_SOURCE_DIR}/smoke.sh)
+
+find_program(PROMTOOL_EXECUTABLE promtool)
+if(PROMTOOL_EXECUTABLE)
+  execute_process(
+    COMMAND ${PROMTOOL_EXECUTABLE} test rules /dev/null
+    RESULT_VARIABLE rc
+    OUTPUT_QUIET)
+  if(NOT rc)
+    add_ceph_test(run-promtool-unittests
+      ${PROMTOOL_EXECUTABLE} test rules ${CMAKE_SOURCE_DIR}/monitoring/prometheus/alerts/test_alerts.yml)
+  else()
+    message(WARNING "'${PROMTOOL_EXECUTABLE} test rules' does not work, "
+      "please use a newer prometheus")
+  endif()
+else()
+  if(LINUX)
+    add_ceph_test(run-promtool-unittests
+      {CMAKE_CURRENT_SOURCE_DIR}/run-promtool-unittests.sh)
+  endif()
+endif()
 
 set_property(
   TEST ${tox_tests}

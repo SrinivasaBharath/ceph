@@ -4,12 +4,13 @@
 #ifndef CEPH_RGW_PUBSUB_H
 #define CEPH_RGW_PUBSUB_H
 
-#include "rgw_sal.h"
 #include "services/svc_sys_obj.h"
 #include "rgw_tools.h"
 #include "rgw_zone.h"
 #include "rgw_notify_event_type.h"
 #include <boost/container/flat_map.hpp>
+
+namespace rgw::sal { class RadosStore; }
 
 class XMLObj;
 
@@ -592,7 +593,7 @@ class RGWPubSub
 {
   friend class Bucket;
 
-  rgw::sal::RGWRadosStore *store;
+  rgw::sal::RadosStore* store;
   const std::string tenant;
   RGWSysObjectCtx obj_ctx;
 
@@ -625,7 +626,7 @@ class RGWPubSub
 			RGWObjVersionTracker* objv_tracker, optional_yield y);
 
 public:
-  RGWPubSub(rgw::sal::RGWRadosStore *_store, const std::string& tenant);
+  RGWPubSub(rgw::sal::RadosStore* _store, const std::string& tenant);
 
   class Bucket {
     friend class RGWPubSub;

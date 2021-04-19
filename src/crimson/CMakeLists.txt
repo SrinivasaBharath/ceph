@@ -78,6 +78,7 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/common/HTMLFormatter.cc
   ${PROJECT_SOURCE_DIR}/src/common/Formatter.cc
   ${PROJECT_SOURCE_DIR}/src/common/Graylog.cc
+  ${PROJECT_SOURCE_DIR}/src/common/Journald.cc
   ${PROJECT_SOURCE_DIR}/src/common/ostream_temp.cc
   ${PROJECT_SOURCE_DIR}/src/common/LogEntry.cc
   ${PROJECT_SOURCE_DIR}/src/common/TextTable.cc
@@ -117,12 +118,13 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/osd/PGPeeringEvent.cc
   ${PROJECT_SOURCE_DIR}/src/xxHash/xxhash.c
   ${crimson_common_srcs}
-  $<TARGET_OBJECTS:common_mountcephfs_objs>)
+  $<TARGET_OBJECTS:common_mountcephfs_objs>
+  $<TARGET_OBJECTS:common-options-objs>)
 
 target_compile_definitions(crimson-common PRIVATE
-  "CEPH_LIBDIR=\"${CMAKE_INSTALL_FULL_LIBDIR}\""
-  "CEPH_PKGLIBDIR=\"${CEPH_INSTALL_FULL_PKGLIBDIR}\""
-  "CEPH_DATADIR=\"${CEPH_INSTALL_DATADIR}\"")
+  "CMAKE_INSTALL_LIBDIR=\"${CMAKE_INSTALL_LIBDIR}\""
+  "CEPH_INSTALL_FULL_PKGLIBDIR=\"${CEPH_INSTALL_FULL_PKGLIBDIR}\""
+  "CEPH_INSTALL_DATADIR=\"${CEPH_INSTALL_DATADIR}\"")
 
 set(crimson_common_deps
   Boost::iostreams
@@ -174,7 +176,6 @@ set(crimson_net_srcs
   net/SocketMessenger.cc
   net/Socket.cc
   net/Protocol.cc
-  net/ProtocolV1.cc
   net/ProtocolV2.cc
   net/chained_dispatchers.cc)
 add_library(crimson STATIC
@@ -184,6 +185,8 @@ add_library(crimson STATIC
   ${crimson_net_srcs})
 target_compile_options(crimson PUBLIC
   "-ftemplate-backtrace-limit=0")
+set_target_properties(crimson PROPERTIES
+  JOB_POOL_COMPILE heavy_compile_job_pool)
 target_link_libraries(crimson
   PUBLIC
     crimson-common

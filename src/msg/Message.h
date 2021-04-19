@@ -67,6 +67,8 @@
 #define MSG_CONFIG           62
 #define MSG_GET_CONFIG       63
 
+#define MSG_KV_DATA          54
+
 #define MSG_MON_GET_PURGED_SNAPS 76
 #define MSG_MON_GET_PURGED_SNAPS_REPLY 77
 
@@ -428,7 +430,7 @@ public:
       byte_throttler->put(data.length());
     bl = std::move(data);
   }
-  off_t get_data_len() const { return data.length(); }
+  uint32_t get_data_len() const { return data.length(); }
 
   void set_recv_stamp(utime_t t) { recv_stamp = t; }
   const utime_t& get_recv_stamp() const { return recv_stamp; }

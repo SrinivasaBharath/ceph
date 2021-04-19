@@ -807,7 +807,6 @@ void PgScrubber::on_init()
 
 void PgScrubber::on_replica_init()
 {
-  ceph_assert(!m_active);
   m_active = true;
 }
 
@@ -1141,7 +1140,6 @@ void PgScrubber::set_op_parameters(requested_scrub_t& request)
   // the publishing here seems to be required for tests synchronization
   m_pg->publish_stats_to_osd();
   m_flags.deep_scrub_on_error = request.deep_scrub_on_error;
-  request = requested_scrub_t{};
 }
 
 void PgScrubber::scrub_compare_maps()
@@ -1489,6 +1487,8 @@ void PgScrubber::scrub_finish()
 	   << " deep_scrub_on_error: " << m_flags.deep_scrub_on_error << dendl;
 
   ceph_assert(m_pg->is_locked());
+
+  m_pg->m_planned_scrub = requested_scrub_t{};
 
   // if the repair request comes from auto-repair and large number of errors,
   // we would like to cancel auto-repair

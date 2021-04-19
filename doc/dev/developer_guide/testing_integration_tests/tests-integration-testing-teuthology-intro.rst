@@ -63,23 +63,23 @@ Select your job's priority (the value of ``N``) in accordance with the following
 
    * - Priority
      - Explanation
-   * - **Priority < 10**
+   * - **N < 10**
      - Use this if the sky is falling and some group of tests must be run ASAP.
-   * - **10 <= Priority < 50**
+   * - **10 <= N < 50**
      - Use this if your tests are urgent and blocking other important
        development.
-   * - **50 <= Priority < 75**
+   * - **50 <= N < 75**
      - Use this if you are testing a particular feature/fix and running fewer
        than about 25 jobs. This range is also used for urgent release testing.
-   * - **75 <= Priority < 100**
+   * - **75 <= N < 100**
      - Tech Leads regularly schedule integration tests with this priority to
        verify pull requests against master.
-   * - **100 <= Priority < 150**
+   * - **100 <= N < 150**
      - This priority is used for QE validation of point releases.
-   * - **150 <= Priority < 200**
+   * - **150 <= N < 200**
      - Use this priority for 100 jobs or fewer that test a particular feature
        or fix.  Results are available in about 24 hours.
-   * - **200 <= Priority < 1000**
+   * - **200 <= N < 1000**
      - Use this priority for large test runs.  Results are available in about a
        week.
 
@@ -96,50 +96,46 @@ Suites Inventory
 The ``suites`` directory of the `ceph/qa sub-directory`_ contains all the
 integration tests for all the Ceph components.
 
-`ceph-deploy <https://github.com/ceph/ceph/tree/master/qa/suites/ceph-deploy>`_
-  install a Ceph cluster with ``ceph-deploy`` (`ceph-deploy man page`_)
+.. list-table:: **Suites**
 
-`dummy <https://github.com/ceph/ceph/tree/master/qa/suites/dummy>`_
-  get a machine, do nothing and return success (commonly used to
-  verify that the integration testing infrastructure works as expected)
+  * - **Component**
+    - **Function**
 
-`fs <https://github.com/ceph/ceph/tree/master/qa/suites/fs>`_
-  test CephFS mounted using FUSE
+  * - `ceph-deploy <https://github.com/ceph/ceph/tree/master/qa/suites/ceph-deploy>`_
+    - install a Ceph cluster with ``ceph-deploy`` (`ceph-deploy man page`_)
 
-`kcephfs <https://github.com/ceph/ceph/tree/master/qa/suites/kcephfs>`_
-  test CephFS mounted using kernel
+  * - `dummy <https://github.com/ceph/ceph/tree/master/qa/suites/dummy>`_
+    - get a machine, do nothing and return success (commonly used to verify
+      that the integration testing infrastructure works as expected)
 
-`krbd <https://github.com/ceph/ceph/tree/master/qa/suites/krbd>`_
-  test the RBD kernel module
+  * - `fs <https://github.com/ceph/ceph/tree/master/qa/suites/fs>`_
+    - test CephFS mounted using kernel and FUSE clients, also with multiple MDSs.
 
-`multimds <https://github.com/ceph/ceph/tree/master/qa/suites/multimds>`_
-  test CephFS with multiple MDSs
+  * - `krbd <https://github.com/ceph/ceph/tree/master/qa/suites/krbd>`_
+    - test the RBD kernel module
 
-`powercycle <https://github.com/ceph/ceph/tree/master/qa/suites/powercycle>`_
-  verify the Ceph cluster behaves when machines are powered off
-  and on again
+  * - `powercycle <https://github.com/ceph/ceph/tree/master/qa/suites/powercycle>`_
+    - verify the Ceph cluster behaves when machines are powered off and on
+      again
 
-`rados <https://github.com/ceph/ceph/tree/master/qa/suites/rados>`_
-  run Ceph clusters including OSDs and MONs, under various conditions of
-  stress
+  * - `rados <https://github.com/ceph/ceph/tree/master/qa/suites/rados>`_
+    - run Ceph clusters including OSDs and MONs, under various conditions of
+      stress
 
-`rbd <https://github.com/ceph/ceph/tree/master/qa/suites/rbd>`_
-  run RBD tests using actual Ceph clusters, with and without qemu
+  * - `rbd <https://github.com/ceph/ceph/tree/master/qa/suites/rbd>`_
+    - run RBD tests using actual Ceph clusters, with and without qemu
 
-`rgw <https://github.com/ceph/ceph/tree/master/qa/suites/rgw>`_
-  run RGW tests using actual Ceph clusters
+  * - `rgw <https://github.com/ceph/ceph/tree/master/qa/suites/rgw>`_
+    - run RGW tests using actual Ceph clusters
 
-`smoke <https://github.com/ceph/ceph/tree/master/qa/suites/smoke>`_
-  run tests that exercise the Ceph API with an actual Ceph cluster
+  * - `smoke <https://github.com/ceph/ceph/tree/master/qa/suites/smoke>`_
+    - run tests that exercise the Ceph API with an actual Ceph cluster
 
-`teuthology <https://github.com/ceph/ceph/tree/master/qa/suites/teuthology>`_
-  verify that teuthology can run integration tests, with and without OpenStack
+  * - `teuthology <https://github.com/ceph/ceph/tree/master/qa/suites/teuthology>`_ 
+    - verify that teuthology can run integration tests, with and without OpenStack
 
-`upgrade <https://github.com/ceph/ceph/tree/master/qa/suites/upgrade>`_
-  for various versions of Ceph, verify that upgrades can happen
-  without disrupting an ongoing workload
-
-`ceph-deploy man page`_
+  * - `upgrade <https://github.com/ceph/ceph/tree/master/qa/suites/upgrade>`_
+    - for various versions of Ceph, verify that upgrades can happen without disrupting an ongoing workload
 
 teuthology-describe
 -------------------
@@ -155,28 +151,31 @@ Since this is a new feature, many yaml files have yet to be annotated.
 Developers are encouraged to improve the coverage and the quality of the
 documentation. 
 
-How integration tests are run
------------------------------
+How to run integration tests 
+----------------------------
 
-As a new Ceph developer you will probably not have access to the `Sepia lab`_.
-You might however be able to run some integration tests in your own
-environment. Ask members from the relevant team how to do this. 
+Typically, the `Sepia lab`_ is used to run integration tests. But as a new Ceph
+developer, you will probably not have access to the `Sepia lab`_.  You might
+however be able to run some integration tests in an environment separate from
+the `Sepia lab`_ . Ask members from the relevant team how to do this. 
 
-One option is to set up a teuthology cluster on bare metal. Though this is a
-non-trivial task, it `is` possible. Here are `some notes
+One way to run your own integration tests is to set up a teuthology cluster on
+bare metal. Setting up a teuthology cluster on bare metal is a complex task.
+Here are `some notes
 <https://docs.ceph.com/projects/teuthology/en/latest/LAB_SETUP.html>`_ to get
-you started if you decide to go this route.
+you started if you decide that you are interested in undertaking the complex
+task of setting up a teuthology cluster on bare metal.
 
-Running integration tests on your code contributions and publishing the
-results allows reviewers to verify that changes to the code base do not
-cause regressions, or to analyze test failures when they do occur.
+Running integration tests on your code contributions and publishing the results
+allows reviewers to verify that changes to the code base do not cause
+regressions, and allows reviewers to analyze test failures when they occur.
 
 Every teuthology cluster, whether bare-metal or cloud-provisioned, has a
 so-called "teuthology machine" from which tests suites are triggered using the
 ``teuthology-suite`` command.
 
 A detailed and up-to-date description of each `teuthology-suite`_ option is
-available by running the following command on the teuthology machine
+available by running the following command on the teuthology machine:
 
 .. prompt:: bash $
 

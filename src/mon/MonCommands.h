@@ -410,6 +410,10 @@ COMMAND("fs feature ls",
         "list available cephfs features to be set/unset",
 	"mds", "r")
 
+COMMAND("fs lsflags name=fs_name,type=CephString",
+	"list the flags set on a ceph filesystem",
+	"fs", "r")
+
 COMMAND("fs required_client_features "
         "name=fs_name,type=CephString "
         "name=subop,type=CephChoices,strings=add|rm "
@@ -437,6 +441,7 @@ COMMAND("fs mirror disable "
 	"disable mirroring for a ceph filesystem", "mds", "rw")
 COMMAND("fs mirror peer_add "
 	"name=fs_name,type=CephString "
+	"name=uuid,type=CephString "
 	"name=remote_cluster_spec,type=CephString "
 	"name=remote_fs_name,type=CephString",
 	"add a mirror peer for a ceph filesystem", "mds", "rw")
@@ -1200,7 +1205,7 @@ COMMAND("osd tier add-cache "
 	"osd", "rw")
 
 /*
- * mon/ConfigKeyService.cc
+ * mon/KVMonitor.cc
  */
 
 COMMAND("config-key get "

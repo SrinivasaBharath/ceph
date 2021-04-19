@@ -8,10 +8,10 @@
 #include <boost/algorithm/hex.hpp>
 #include <boost/context/protected_fixedsize_stack.hpp>
 #include <spawn/spawn.hpp>
+#include "rgw_sal_rados.h"
 #include "rgw_pubsub.h"
 #include "rgw_pubsub_push.h"
 #include "rgw_perf_counters.h"
-#include "rgw_sal_rados.h"
 #include "common/dout.h"
 #include <chrono>
 
@@ -145,6 +145,9 @@ class Manager : public DoutPrefixProvider {
       timer(io_context) {}  
  
     void async_wait(spawn::yield_context yield) { 
+      if (pending_tokens == 0) {
+        return;
+      }
       timer.expires_from_now(infinite_duration);
       boost::system::error_code ec; 
       timer.async_wait(yield[ec]);
@@ -360,7 +363,6 @@ class Manager : public DoutPrefixProvider {
           << queue_name << dendl;
         }
       }
-
     }
   }
 
@@ -381,6 +383,8 @@ class Manager : public DoutPrefixProvider {
     const auto max_jitter = 500; // ms
     std::uniform_int_distribution<> duration_jitter(min_jitter, max_jitter);
 
+    std::vector<std::string> queue_gc;
+    std::mutex queue_gc_lock;
     while (true) {
       Timer timer(io_context);
       const auto duration = (has_error ? 
@@ -399,8 +403,6 @@ class Manager : public DoutPrefixProvider {
         continue;
       }
 
-      std::vector<std::string> queue_gc;
-      std::mutex queue_gc_lock;
       for (const auto& queue_name : queues) {
         // try to lock the queue to check if it is owned by this rgw
         // or if ownershif needs to be taken
@@ -472,7 +474,7 @@ public:
   Manager(CephContext* _cct, uint32_t _max_queue_size, uint32_t _queues_update_period_ms, 
           uint32_t _queues_update_retry_ms, uint32_t _queue_idle_sleep_us, u_int32_t failover_time_ms, 
           uint32_t _stale_reservations_period_s, uint32_t _reservations_cleanup_period_s,
-          uint32_t _worker_count, rgw::sal::RGWRadosStore* store) : 
+          uint32_t _worker_count, rgw::sal::RadosStore* store) :
     max_queue_size(_max_queue_size),
     queues_update_period_ms(_queues_update_period_ms),
     queues_update_retry_ms(_queues_update_retry_ms),
@@ -493,9 +495,16 @@ public:
       // start the worker threads to do the actual queue processing
       const std::string WORKER_THREAD_NAME = "notif-worker";
       for (auto worker_id = 0U; worker_id < worker_count; ++worker_id) {
-        workers.emplace_back([this]() noexcept { io_context.run(); });
+        workers.emplace_back([this]() {
+          try {
+            io_context.run(); 
+          } catch (const std::exception& err) {
+            ldpp_dout(this, 10) << "Notification worker failed with error: " << err.what() << dendl;
+            throw(err);
+          }
+        });
         const auto rc = ceph_pthread_setname(workers.back().native_handle(), 
-            (WORKER_THREAD_NAME+std::to_string(worker_id)).c_str());
+          (WORKER_THREAD_NAME+std::to_string(worker_id)).c_str());
         ceph_assert(rc == 0);
       }
       ldpp_dout(this, 10) << "Started notification manager with: " << worker_count << " workers" << dendl;
@@ -574,7 +583,7 @@ constexpr uint32_t WORKER_COUNT = 1;                 // 1 worker thread
 constexpr uint32_t STALE_RESERVATIONS_PERIOD_S = 120;   // cleanup reservations that are more than 2 minutes old
 constexpr uint32_t RESERVATIONS_CLEANUP_PERIOD_S = 30; // reservation cleanup every 30 seconds
 
-bool init(CephContext* cct, rgw::sal::RGWRadosStore* store, const DoutPrefixProvider *dpp) {
+bool init(CephContext* cct, rgw::sal::RadosStore* store, const DoutPrefixProvider *dpp) {
   if (s_manager) {
     return false;
   }
@@ -607,7 +616,7 @@ int remove_persistent_topic(const std::string& topic_name, optional_yield y) {
   return s_manager->remove_persistent_topic(topic_name, y);
 }
 
-rgw::sal::RGWObject* get_object_with_atttributes(const req_state* s, rgw::sal::RGWObject* obj) {
+rgw::sal::Object* get_object_with_atttributes(const req_state* s, rgw::sal::Object* obj) {
   // in case of copy obj, the tags and metadata are taken from source
   const auto src_obj = s->src_object ? s->src_object.get() : obj;
   if (src_obj->get_attrs().empty()) {
@@ -621,7 +630,7 @@ rgw::sal::RGWObject* get_object_with_atttributes(const req_state* s, rgw::sal::R
   return src_obj;
 }
 
-void metadata_from_attributes(const req_state* s, rgw::sal::RGWObject* obj, KeyValueMap& metadata) {
+void metadata_from_attributes(const req_state* s, rgw::sal::Object* obj, KeyValueMap& metadata) {
   const auto src_obj = get_object_with_atttributes(s, obj);
   if (!src_obj) {
     return;
@@ -637,7 +646,7 @@ void metadata_from_attributes(const req_state* s, rgw::sal::RGWObject* obj, KeyV
   }
 }
 
-void tags_from_attributes(const req_state* s, rgw::sal::RGWObject* obj, KeyValueMap& tags) {
+void tags_from_attributes(const req_state* s, rgw::sal::Object* obj, KeyValueMap& tags) {
   const auto src_obj = get_object_with_atttributes(s, obj);
   if (!src_obj) {
     return;
@@ -659,7 +668,7 @@ void tags_from_attributes(const req_state* s, rgw::sal::RGWObject* obj, KeyValue
 
 // populate event from request
 void populate_event_from_request(const req_state *s, 
-        rgw::sal::RGWObject* obj,
+        rgw::sal::Object* obj,
         uint64_t size,
         const ceph::real_time& mtime, 
         const std::string& etag, 
@@ -701,7 +710,7 @@ void populate_event_from_request(const req_state *s,
   // opaque data will be filled from topic configuration
 }
 
-bool notification_match(const rgw_pubsub_topic_filter& filter, const req_state* s, rgw::sal::RGWObject* obj, 
+bool notification_match(const rgw_pubsub_topic_filter& filter, const req_state* s, rgw::sal::Object* obj,
     EventType event, const RGWObjTags* req_tags) {
   if (!match(filter.events, event)) { 
     return false;
@@ -806,7 +815,7 @@ int publish_reserve(EventType event_type,
   return 0;
 }
 
-int publish_commit(rgw::sal::RGWObject* obj,
+int publish_commit(rgw::sal::Object* obj,
         uint64_t size,
         const ceph::real_time& mtime, 
         const std::string& etag, 

@@ -365,7 +365,7 @@ protected:
   virtual void append_scheduled_ops(void) = 0;
   virtual void schedule_append_ops(pwl::GenericLogOperations &ops) = 0;
   virtual void remove_pool_file() = 0;
-  virtual void initialize_pool(Context *on_finish,
+  virtual bool initialize_pool(Context *on_finish,
                                pwl::DeferredContexts &later) = 0;
   virtual void collect_read_extents(
       uint64_t read_buffer_offset, LogMapEntry<GenericWriteLogEntry> map_entry,
@@ -393,6 +393,10 @@ protected:
       const std::shared_ptr<pwl::GenericLogEntry> log_entry) {
     return nullptr;
   }
+  virtual uint64_t get_max_extent() {
+    return 0;
+  }
+
 };
 
 } // namespace pwl

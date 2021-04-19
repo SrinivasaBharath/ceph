@@ -1997,29 +1997,6 @@ public:
     }
   };
 
-  struct DBHistogram {
-    struct value_dist {
-      uint64_t count;
-      uint32_t max_len;
-    };
-
-    struct key_dist {
-      uint64_t count;
-      uint32_t max_len;
-      std::map<int, struct value_dist> val_map; ///< slab id to count, max length of value and key
-    };
-
-    std::map<std::string, std::map<int, struct key_dist> > key_hist;
-    std::map<int, uint64_t> value_hist;
-    int get_key_slab(size_t sz);
-    std::string get_key_slab_to_range(int slab);
-    int get_value_slab(size_t sz);
-    std::string get_value_slab_to_range(int slab);
-    void update_hist_entry(std::map<std::string, std::map<int, struct key_dist> > &key_hist,
-			  const std::string &prefix, size_t key_size, size_t value_size);
-    void dump(ceph::Formatter *f);
-  };
-
   struct BigDeferredWriteContext {
     uint64_t off = 0;     // original logical offset
     uint32_t b_off = 0;   // blob relative offset
@@ -3052,6 +3029,7 @@ private:
   std::set<std::string> failed_compressors;
   std::string spillover_alert;
   std::string legacy_statfs_alert;
+  std::string no_per_pool_omap_alert;
   std::string no_per_pg_omap_alert;
   std::string disk_size_mismatch_alert;
   std::string spurious_read_errors_alert;
@@ -3082,7 +3060,7 @@ private:
   }
 
   void _check_legacy_statfs_alert();
-  void _check_no_per_pg_omap_alert();
+  void _check_no_per_pg_or_pool_omap_alert();
   void _set_disk_size_mismatch_alert(const std::string& s) {
     std::lock_guard l(qlock);
     disk_size_mismatch_alert = s;
@@ -3785,7 +3763,7 @@ public:
   void* get_hint_for_log() const override {
     return  reinterpret_cast<void*>(LEVEL_LOG);
   }
-  void* get_hint_by_dir(const std::string& dirname) const override;
+  void* get_hint_by_dir(std::string_view dirname) const override;
 
   void add_usage(void* hint, const bluefs_fnode_t& fnode) override {
     if (hint == nullptr)

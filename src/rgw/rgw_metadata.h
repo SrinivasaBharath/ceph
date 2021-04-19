@@ -20,7 +20,7 @@
 
 
 namespace rgw { namespace sal {
-class RGWRadosStore;
+class Store;
 } }
 class RGWCoroutine;
 class JSONObj;

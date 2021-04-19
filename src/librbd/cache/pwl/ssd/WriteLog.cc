@@ -64,27 +64,21 @@ void WriteLog<I>::collect_read_extents(
     uint64_t entry_hit_length, Extent hit_extent,
     pwl::C_ReadRequest *read_ctx) {
     // Make a bl for this hit extent. This will add references to the
-    // write_entry->pmem_bp */
+    // write_entry->cache_bl */
+    ldout(m_image_ctx.cct, 5) << dendl;
     auto write_entry = static_pointer_cast<WriteLogEntry>(map_entry.log_entry);
     buffer::list hit_bl;
     hit_bl = write_entry->get_cache_bl();
+    bool writesame = write_entry->is_writesame_entry();
+    auto hit_extent_buf = std::make_shared<ImageExtentBuf>(
+        hit_extent, hit_bl, true, read_buffer_offset, writesame);
+    read_ctx->read_extents.push_back(hit_extent_buf);
 
     if(!hit_bl.length()) {
-      ImageExtentBuf hit_extent_buf;
-      bool writesame = write_entry->is_writesame_entry();
-      hit_extent_buf = ImageExtentBuf(
-          {hit_extent, true, read_buffer_offset, writesame});
-      read_ctx->read_extents.push_back(hit_extent_buf);
-      ImageExtentBuf &read_extent = read_ctx->read_extents.back();
-
+      ldout(m_image_ctx.cct, 5) << "didn't hit RAM" << dendl;
+      auto read_extent = read_ctx->read_extents.back();
       log_entries_to_read.push_back(&write_entry->ram_entry);
-      bls_to_read.push_back(&read_extent.m_bl);
-    } else {
-      buffer::list new_bl;
-      new_bl.substr_of(hit_bl, read_buffer_offset, entry_hit_length);
-      assert(new_bl.length() == entry_hit_length);
-      ImageExtentBuf hit_extent_buf(hit_extent, new_bl);
-      read_ctx->read_extents.push_back(hit_extent_buf);
+      bls_to_read.push_back(&read_extent->m_bl);
     }
 }
 
@@ -101,7 +95,7 @@ void WriteLog<I>::complete_read(
 }
 
 template <typename I>
-void WriteLog<I>::initialize_pool(Context *on_finish,
+bool WriteLog<I>::initialize_pool(Context *on_finish,
                                   pwl::DeferredContexts &later) {
   CephContext *cct = m_image_ctx.cct;
   ceph_assert(ceph_mutex_is_locked_by_me(m_lock));
@@ -123,7 +117,7 @@ void WriteLog<I>::initialize_pool(Context *on_finish,
       m_cache_state->empty = true;
       /* TODO: filter/replace errnos that are meaningless to the caller */
       on_finish->complete(-errno);
-      return;
+      return false;
     }
 
     bdev = BlockDevice::create(cct, this->m_log_pool_name, aio_cache_cb,
@@ -132,7 +126,7 @@ void WriteLog<I>::initialize_pool(Context *on_finish,
     if (r < 0) {
       delete bdev;
       on_finish->complete(-1);
-      return;
+      return false;
     }
     m_cache_state->present = true;
     m_cache_state->clean = true;
@@ -179,7 +173,7 @@ void WriteLog<I>::initialize_pool(Context *on_finish,
      if (r < 0) {
        delete bdev;
        on_finish->complete(r);
-       return;
+       return false;
      }
      load_existing_entries(later);
      if (m_first_free_entry < m_first_valid_entry) {
@@ -198,6 +192,7 @@ void WriteLog<I>::initialize_pool(Context *on_finish,
      m_cache_state->clean = this->m_dirty_log_entries.empty();
      m_cache_state->empty = m_log_entries.empty();
   }
+  return true;
 }
 
 template <typename I>

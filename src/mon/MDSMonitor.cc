@@ -1215,6 +1215,24 @@ bool MDSMonitor::preprocess_command(MonOpRequestRef op)
       }
     }
     r = 0;
+  } else if (prefix == "fs lsflags") {
+    string fs_name;
+    cmd_getval(cmdmap, "fs_name", fs_name);
+    const auto &fs = fsmap.get_filesystem(fs_name);
+    if (!fs) {
+      ss << "filesystem '" << fs_name << "' not found";
+      r = -ENOENT;
+    } else {
+      const MDSMap &mds_map = fs->mds_map;
+      if (f) {
+        mds_map.dump_flags_state(f.get());
+        f->flush(ds);
+      }
+      else {
+        mds_map.print_flags(ds);
+      }
+      r = 0;
+    }
   }
 
 out:
@@ -1232,11 +1250,6 @@ bool MDSMonitor::fail_mds_gid(FSMap &fsmap, mds_gid_t gid)
 {
   const auto& info = fsmap.get_info_gid(gid);
   dout(1) << "fail_mds_gid " << gid << " mds." << info.name << " role " << info.rank << dendl;
-
-  if (info.is_frozen()) {
-    dout(1) << "mds is frozen" << dendl;
-    return false;
-  }
 
   ceph_assert(mon.osdmon()->is_writeable());
 
@@ -2000,10 +2013,7 @@ bool MDSMonitor::maybe_resize_cluster(FSMap &fsmap, fs_cluster_id_t fscid)
   } else if (in > max) {
     mds_rank_t target = in - 1;
     const auto &info = mds_map.get_info(target);
-    if (info.is_frozen()) {
-      dout(1) << "highest rank is frozen" << dendl;
-      return false;
-    } else if (mds_map.is_active(target)) {
+    if (mds_map.is_active(target)) {
       dout(1) << "stopping " << target << dendl;
       mon.clog->info() << "stopping " << info.human_name();
       auto f = [](auto& info) {
@@ -2248,7 +2258,7 @@ bool MDSMonitor::maybe_promote_standby(FSMap &fsmap, Filesystem& fs)
     }
   }
 
-  if (!fs.mds_map.is_degraded() && fs.mds_map.allows_standby_replay()) {
+  if (fs.mds_map.is_resizeable() && fs.mds_map.allows_standby_replay()) {
     // There were no failures to replace, so try using any available standbys
     // as standby-replay daemons. Don't do this when the cluster is degraded
     // as a standby-replay daemon may try to read a journal being migrated.
