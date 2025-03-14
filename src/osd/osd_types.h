@@ -1293,6 +1293,7 @@ struct pg_pool_t {
     // Pool features are restricted to those supported by crimson-osd.
     // Note, does not prohibit being created on classic osd.
     FLAG_CRIMSON = 1<<18,
+    FLAG_EC_OPTIMIZATIONS = 1<<19, // enable optimizations, once enabled, cannot be disabled
   };
 
   static const char *get_flag_name(uint64_t f) {
@@ -1316,6 +1317,7 @@ struct pg_pool_t {
     case FLAG_EIO: return "eio";
     case FLAG_BULK: return "bulk";
     case FLAG_CRIMSON: return "crimson";
+    case FLAG_EC_OPTIMIZATIONS: return "ec_optimizations";
     default: return "???";
     }
   }
@@ -1372,6 +1374,8 @@ struct pg_pool_t {
       return FLAG_BULK;
     if (name == "crimson")
       return FLAG_CRIMSON;
+    if (name == "ec_optimizations")
+      return FLAG_EC_OPTIMIZATIONS;
     return 0;
   }
 
@@ -1772,6 +1776,10 @@ public:
 
   bool allows_ecoverwrites() const {
     return has_flag(FLAG_EC_OVERWRITES);
+  }
+
+  bool allows_ecoptimizations() const {
+    return has_flag(FLAG_EC_OPTIMIZATIONS);
   }
 
   bool is_crimson() const {
@@ -3437,6 +3445,8 @@ public:
     uint32_t new_crush_barrier,
     int32_t old_crush_member,
     int32_t new_crush_member,
+    bool old_allow_ec_optimizations,
+    bool new_allow_ec_optimizations,
     pg_t pgid
     );
 
